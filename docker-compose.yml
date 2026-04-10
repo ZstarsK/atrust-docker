@@ -1,0 +1,29 @@
+services:
+  atrust-xfce:
+    image: zstarsk/atrust-docker:latest
+    container_name: atrust-xfce
+    platform: linux/amd64
+    restart: unless-stopped
+    privileged: true
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      net.ipv4.conf.default.route_localnet: "1"
+    environment:
+      GRACE_DESKTOP_SECONDS: "180"
+      WATCHDOG_INTERVAL: "5"
+      VPN_TEST_URL: "xxx"
+      VPN_TEST_TIMEOUT: "8"
+      PLUGIN_STRICT_BOOT_SECONDS: "180"
+    ports:
+      - "127.0.0.1:3390:3389"
+      - "127.0.0.1:5902:5901"
+      - "127.0.0.1:1080:1080"
+      - "127.0.0.1:8888:8888"
+      - "127.0.0.1:54632:54631"
+    volumes:
+      - ${HOME}/.atrust-data-xfce/root:/root
+      - ${HOME}/.atrust-data-xfce/sangfor-shared:/usr/share/sangfor/.aTrust
+      - ${HOME}/.atrust-data-xfce/logs:/usr/share/sangfor/EasyConnect/resources/logs
