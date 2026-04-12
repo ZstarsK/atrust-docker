@@ -139,4 +139,4 @@ Private internal URLs are not included in this repository. Users should provide 
 
 ## License
 
-If you plan to open this project to broader public use, add an explicit license file before distributing it further.
+MIT License
