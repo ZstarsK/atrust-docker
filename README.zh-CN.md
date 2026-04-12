@@ -139,4 +139,4 @@ watchdog 用于做连通性探测的测试 URL。
 
 ## License
 
-如果你准备把这个项目更正式地公开发布，建议补充一个明确的 License 文件。
+MIT License
