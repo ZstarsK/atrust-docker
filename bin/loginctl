@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+session_id="${ATRUST_SESSION_ID:-1}"
+user_name="${SANGFOR_USER:-sangfor}"
+
+case "${1:-}" in
+  --no-legend)
+    shift
+    ;;
+esac
+
+case "${1:-}" in
+  list-sessions)
+    # aTrust only needs a single active desktop-like user session in Docker.
+    printf '%s %s seat0 tty1\n' "$session_id" "$user_name"
+    ;;
+  show-session)
+    # aTrust parses User as a login name and rejects tty sessions, so expose an x11 session.
+    printf 'User=%s\n' "$user_name"
+    printf 'Type=x11\n'
+    printf 'Class=user\n'
+    printf 'Active=yes\n'
+    ;;
+  *)
+    exec /usr/bin/loginctl "$@"
+    ;;
+esac

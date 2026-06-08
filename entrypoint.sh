@@ -11,6 +11,7 @@ VPN_TEST_URL="${VPN_TEST_URL:-}"
 VPN_TEST_TIMEOUT="${VPN_TEST_TIMEOUT:-8}"
 PLUGIN_STRICT_BOOT_SECONDS="${PLUGIN_STRICT_BOOT_SECONDS:-180}"  # 启动前3分钟严格保证 daemon 存在，便于登录
 CORE_RESTART_INTERVAL="${CORE_RESTART_INTERVAL:-90}"
+CORE_BOOT_GRACE_SECONDS="${CORE_BOOT_GRACE_SECONDS:-180}"
 ATRUST_EINTR_PRELOAD="${ATRUST_EINTR_PRELOAD:-1}"
 EINTR_PRELOAD_LIB="${EINTR_PRELOAD_LIB:-/usr/local/lib/eintr-retry.so}"
 
@@ -88,12 +89,17 @@ ensure_dirs() {
     "$runtime_dir" \
     /run/xrdp /run/xrdp/sockdir /var/run/xrdp \
     /run/tinyproxy \
+    "/home/${SANGFOR_USER}/.config/aTrustTray" \
+    "/home/${SANGFOR_USER}/.aTrust" \
+    /tmp/com.sangfor.atrust \
     /usr/share/sangfor/.aTrust/var/run/plugin-daemon \
     /usr/share/sangfor/.aTrust/var/run/plugins/aTrustCore \
     /usr/share/sangfor/.aTrust/var/run/plugins/aTrustTunnel
 
   chown "$SANGFOR_USER:$SANGFOR_USER" "$runtime_dir" || true
+  chown -R "$SANGFOR_USER:$SANGFOR_USER" "/home/${SANGFOR_USER}/.config" "/home/${SANGFOR_USER}/.aTrust" /tmp/com.sangfor.atrust || true
   chmod 700 "$runtime_dir" || true
+  chmod -R 777 "/home/${SANGFOR_USER}/.config/aTrustTray" "/home/${SANGFOR_USER}/.aTrust" /tmp/com.sangfor.atrust || true
   chmod 1777 /run/xrdp/sockdir || true
 
   touch "$PLUGIN_LOG" "$TINYPROXY_LOG" "$DANTED_LOG" "$WATCHDOG_LOG" "$XRDP_LOG" "$SESMAN_LOG"
@@ -560,6 +566,13 @@ boot_phase_requires_plugin() {
   [ "$elapsed" -lt "$PLUGIN_STRICT_BOOT_SECONDS" ]
 }
 
+core_boot_grace_active() {
+  local now elapsed
+  now="$(date +%s)"
+  elapsed="$((now - START_TS))"
+  [ "$elapsed" -lt "$CORE_BOOT_GRACE_SECONDS" ]
+}
+
 watchdog_interval_enabled() {
   case "$WATCHDOG_INTERVAL" in
     0|false|FALSE|False|no|NO|No|off|OFF|Off|disabled|DISABLED|Disabled)
@@ -631,7 +644,13 @@ watchdog_loop() {
       fi
     fi
 
-    restart_core_if_stuck || true
+    if core_boot_grace_active; then
+      if ! core_ready; then
+        log "boot phase: aTrustCore not ready yet; waiting for plugin-daemon to finish startup"
+      fi
+    else
+      restart_core_if_stuck || true
+    fi
 
     # 当前本地状态快照
     danted_ok=0

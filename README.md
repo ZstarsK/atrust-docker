@@ -12,6 +12,8 @@ This repository provides:
 - A container entrypoint for desktop, proxy, and optional watchdog startup
 - A Docker Compose example for daily use
 - A small `LD_PRELOAD` shim that retries selected `EINTR`-interrupted calls used by aTrust RPC threads
+- A login-name fallback preload library used by aTrust plugin startup inside Docker
+- A minimal `loginctl` compatibility wrapper for aTrustCore startup in non-systemd containers
 
 Docker Hub images:
 
@@ -48,6 +50,7 @@ services:
       VPN_TEST_URL: ""
       VPN_TEST_TIMEOUT: "8"
       PLUGIN_STRICT_BOOT_SECONDS: "180"
+      CORE_BOOT_GRACE_SECONDS: "180"
       ATRUST_EINTR_PRELOAD: "1"
     ports:
       - "127.0.0.1:3390:3389"
@@ -129,6 +132,14 @@ How long the container uses stricter boot-time checks to keep the required plugi
 - Default example: `180`
 - Set `0` to disable the strict boot window
 
+### `CORE_BOOT_GRACE_SECONDS`
+
+How long the watchdog waits before treating missing aTrustCore readiness ports as restart-worthy.
+
+- Default: `180`
+- Keep this long enough for `plugin-daemon` to finish launching aTrustCore during login
+- Set `0` to make core readiness checks active immediately after container startup
+
 ### `ATRUST_EINTR_PRELOAD`
 
 Controls the bundled `LD_PRELOAD` shim for retrying selected `EINTR`-interrupted aTrust RPC operations.
@@ -170,9 +181,11 @@ docker buildx build \
 ## Repository Contents
 
 - `Dockerfile`: image build definition
+- `bin/loginctl`: minimal session-query compatibility wrapper used inside the image
 - `docker-compose.yml`: example runtime configuration
 - `entrypoint.sh`: startup, desktop, proxy, and watchdog logic
 - `lib/eintr_retry.c`: source for the optional `LD_PRELOAD` shim
+- `lib/fake_getlogin.c`: source for the login-name fallback preload used by plugin startup
 - `LICENSE`: MIT license
 
 ## Security Note

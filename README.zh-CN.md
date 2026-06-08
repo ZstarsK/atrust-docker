@@ -12,6 +12,8 @@
 - 用于启动桌面、代理和可选 watchdog 的入口脚本
 - 一个可直接参考的 Docker Compose 示例
 - 一个小型 `LD_PRELOAD` shim，用于重试 aTrust RPC 线程里被 `EINTR` 打断的关键调用
+- 一个登录名兜底 preload 库，用于 Docker 内的 aTrust plugin 启动
+- 一个最小化 `loginctl` 兼容脚本，用于非 systemd 容器内的 aTrustCore 启动
 
 Docker Hub 镜像：
 
@@ -48,6 +50,7 @@ services:
       VPN_TEST_URL: ""
       VPN_TEST_TIMEOUT: "8"
       PLUGIN_STRICT_BOOT_SECONDS: "180"
+      CORE_BOOT_GRACE_SECONDS: "180"
       ATRUST_EINTR_PRELOAD: "1"
     ports:
       - "127.0.0.1:3390:3389"
@@ -129,6 +132,14 @@ watchdog 可选的 HTTP(S) 连通性探测 URL。
 - 示例默认值：`180`
 - 设置为 `0` 可禁用启动期严格检查窗口
 
+### `CORE_BOOT_GRACE_SECONDS`
+
+watchdog 在把 aTrustCore 就绪端口缺失视为需要重启前等待的时间，单位为秒。
+
+- 默认值：`180`
+- 建议保留足够时间，让 `plugin-daemon` 在登录阶段完成 aTrustCore 拉起
+- 设置为 `0` 会让核心就绪检查在容器启动后立即生效
+
 ### `ATRUST_EINTR_PRELOAD`
 
 控制内置 `LD_PRELOAD` shim，用于重试 aTrust RPC 操作中被 `EINTR` 打断的部分调用。
@@ -170,9 +181,11 @@ docker buildx build \
 ## 仓库内容
 
 - `Dockerfile`：镜像构建定义
+- `bin/loginctl`：镜像内使用的最小会话查询兼容脚本
 - `docker-compose.yml`：运行示例配置
 - `entrypoint.sh`：启动、桌面、代理和 watchdog 逻辑
 - `lib/eintr_retry.c`：可选 `LD_PRELOAD` shim 的源码
+- `lib/fake_getlogin.c`：plugin 启动所需登录名兜底 preload 的源码
 - `LICENSE`：MIT 许可证
 
 ## 安全说明

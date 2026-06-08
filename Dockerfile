@@ -6,11 +6,13 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends gcc libc6-dev \
  && rm -rf /var/lib/apt/lists/*
 
-COPY lib/eintr_retry.c /tmp/eintr_retry.c
+COPY lib/eintr_retry.c lib/fake_getlogin.c /tmp/
 
 # Build a small preload library that makes aTrust RPC reads resilient to EINTR.
 RUN gcc -shared -fPIC -O2 -Wall -Wextra -ldl \
-    -o /tmp/eintr-retry.so /tmp/eintr_retry.c
+    -o /tmp/eintr-retry.so /tmp/eintr_retry.c \
+ && gcc -shared -fPIC -O2 -Wall -Wextra \
+    -o /tmp/fake-getlogin.so /tmp/fake_getlogin.c
 
 FROM debian:bookworm-slim
 
@@ -70,9 +72,14 @@ RUN set -eux; \
     cat /usr/share/sangfor/aTrust/resources/version
 
 COPY --from=eintr-builder /tmp/eintr-retry.so /usr/local/lib/eintr-retry.so
+COPY --from=eintr-builder /tmp/fake-getlogin.so /usr/local/lib/fake-getlogin.so
+COPY bin/loginctl /usr/local/bin/loginctl
 COPY entrypoint.sh /entrypoint.sh
 
-RUN chmod 0755 /entrypoint.sh /usr/local/lib/eintr-retry.so
+RUN chmod 0755 /entrypoint.sh \
+    /usr/local/bin/loginctl \
+    /usr/local/lib/eintr-retry.so \
+    /usr/local/lib/fake-getlogin.so
 
 EXPOSE 3389 54631 1080 8888
 VOLUME ["/root", "/usr/share/sangfor/.aTrust", "/usr/share/sangfor/EasyConnect/resources/logs"]
