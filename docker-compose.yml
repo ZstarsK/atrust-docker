@@ -14,9 +14,11 @@ services:
     environment:
       GRACE_DESKTOP_SECONDS: "180"
       WATCHDOG_INTERVAL: "5"
-      VPN_TEST_URL: "xxx"
+      # Optional. Set a lightweight internal URL to enable HTTP health checks.
+      VPN_TEST_URL: ""
       VPN_TEST_TIMEOUT: "8"
       PLUGIN_STRICT_BOOT_SECONDS: "180"
+      ATRUST_EINTR_PRELOAD: "1"
     ports:
       - "127.0.0.1:3390:3389"
       - "127.0.0.1:5902:5901"

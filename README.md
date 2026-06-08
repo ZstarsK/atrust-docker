@@ -8,27 +8,25 @@ Open source packaging for running ATrust with an XFCE desktop inside Docker.
 
 This repository provides:
 
-- A Docker image definition for ATrust + XFCE
-- A container entrypoint script for desktop and proxy startup
+- A reproducible Docker image definition for ATrust 2.5.16.20 + XFCE
+- A container entrypoint for desktop, proxy, and optional watchdog startup
 - A Docker Compose example for daily use
+- A small `LD_PRELOAD` shim that retries selected `EINTR`-interrupted calls used by aTrust RPC threads
 
-Docker Hub image:
+Docker Hub images:
 
 - `zstarsk/atrust-docker:latest`
+- `zstarsk/atrust-docker:2.5.16.20-xfce`
 
-## Recommended host environment
+## Recommended Host Environment
 
-The native development platform for this project is macOS.
+The native development platform for this project is macOS with OrbStack.
 
-Recommended Docker daemon/runtime:
+Other Docker environments may work, but this project is primarily developed and verified on macOS + OrbStack. The image runs as `linux/amd64`, so Apple Silicon hosts need Docker platform emulation.
 
-- OrbStack on macOS
+## Quick Start
 
-Other Docker environments may also work, but the project is primarily developed and verified on macOS with OrbStack.
-
-## Quick start
-
-### Option 1: Run with Docker Compose
+### Docker Compose
 
 ```yaml
 services:
@@ -47,9 +45,10 @@ services:
     environment:
       GRACE_DESKTOP_SECONDS: "180"
       WATCHDOG_INTERVAL: "5"
-      VPN_TEST_URL: "xxx"
+      VPN_TEST_URL: ""
       VPN_TEST_TIMEOUT: "8"
       PLUGIN_STRICT_BOOT_SECONDS: "180"
+      ATRUST_EINTR_PRELOAD: "1"
     ports:
       - "127.0.0.1:3390:3389"
       - "127.0.0.1:5902:5901"
@@ -68,74 +67,117 @@ Start the container:
 docker compose up -d
 ```
 
-## Required runtime settings
+Connect to the desktop with RDP:
+
+```text
+127.0.0.1:3390
+```
+
+The default login user created by the image is:
+
+```text
+sangfor / sangfor
+```
+
+## Runtime Requirements
 
 This container is not a zero-config image. The following runtime settings are important:
 
 - `privileged: true`
 - `/dev/net/tun` device mapping
 - `NET_ADMIN` capability
-- `linux/amd64` platform
+- `platform: linux/amd64`
 - Persistent volume mounts for user data and logs
 
-## Environment variables
+## Environment Variables
 
 ### `GRACE_DESKTOP_SECONDS`
 
 How long the desktop session is kept available before automatic shutdown logic runs.
 
-Default example:
-
-- `180`
+- Default example: `180`
+- Set `0`, `never`, `off`, or `disabled` to disable desktop auto-shutdown
 
 ### `WATCHDOG_INTERVAL`
 
-How often the watchdog checks container health and related processes, in seconds.
+How often the watchdog checks local container components, in seconds.
 
-Default example:
-
-- `5`
+- Default example: `5`
+- Set `0`, `off`, or `disabled` to disable the watchdog completely
+- When enabled, the watchdog maintains `tinyproxy`, `plugin-daemon`, `danted`, VPN interface changes, and the local SOCKS listener
 
 ### `VPN_TEST_URL`
 
-A connectivity test URL used by the watchdog logic.
+Optional HTTP(S) connectivity test URL used by the watchdog.
 
-Important:
-
-- Set this to your own reachable URL
-- The repository intentionally uses `xxx` as a placeholder to avoid exposing private internal addresses
+- Default: empty
+- When empty, the watchdog does not probe any business URL and only maintains local components
+- When set, the watchdog runs `curl` inside the container against this URL
+- Use a lightweight internal URL in your own environment if you need end-to-end VPN health checks
 
 ### `VPN_TEST_TIMEOUT`
 
-Timeout for the connectivity test request, in seconds.
+Timeout for `VPN_TEST_URL`, in seconds.
 
-Default example:
-
-- `8`
+- Default example: `8`
+- Only used when `VPN_TEST_URL` is not empty
 
 ### `PLUGIN_STRICT_BOOT_SECONDS`
 
-How long the container keeps strict checks during boot to ensure the required daemon is alive.
+How long the container uses stricter boot-time checks to keep the required plugin daemon available for login.
 
-Default example:
+- Default example: `180`
+- Set `0` to disable the strict boot window
 
-- `180`
+### `ATRUST_EINTR_PRELOAD`
 
-## Repository contents
+Controls the bundled `LD_PRELOAD` shim for retrying selected `EINTR`-interrupted aTrust RPC operations.
+
+- Default: `1`
+- Set `0`, `off`, or `disabled` to remove it from `/etc/ld.so.preload`
+
+### `EINTR_PRELOAD_LIB`
+
+Path to the preload library used when `ATRUST_EINTR_PRELOAD=1`.
+
+- Default: `/usr/local/lib/eintr-retry.so`
+
+### `CORE_RESTART_INTERVAL`
+
+Minimum interval between aTrustCore readiness-triggered restarts, in seconds.
+
+- Default: `90`
+
+## Build Locally
+
+```bash
+docker buildx build \
+  --platform linux/amd64 \
+  -t zstarsk/atrust-docker:local \
+  .
+```
+
+The Dockerfile downloads the aTrust 2.5.16.20 Linux installer from Sangfor's public CDN by default. You can override it:
+
+```bash
+docker buildx build \
+  --platform linux/amd64 \
+  --build-arg ATRUST_DEB_URL=https://example.com/aTrustInstaller_amd64.deb \
+  -t zstarsk/atrust-docker:local \
+  .
+```
+
+## Repository Contents
 
 - `Dockerfile`: image build definition
 - `docker-compose.yml`: example runtime configuration
-- `entrypoint.sh`: startup and watchdog logic
+- `entrypoint.sh`: startup, desktop, proxy, and watchdog logic
+- `lib/eintr_retry.c`: source for the optional `LD_PRELOAD` shim
+- `LICENSE`: MIT license
 
-## Notes
+## Security Note
 
-- `entrypoint.sh` is already copied into the image during build, so it does not need to be mounted separately in normal usage
-- If you need to customize runtime behavior, prefer overriding environment variables first
-- Replace placeholder values before production use
-
-## Security note
-
-Private internal URLs are not included in this repository. Users should provide their own environment-specific values.
+Private internal URLs are not included in this repository. `VPN_TEST_URL` is intentionally empty by default; users should provide their own environment-specific health check URL only when needed.
 
 ## License
 

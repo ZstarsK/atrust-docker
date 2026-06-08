@@ -7,9 +7,12 @@ set -Eeuo pipefail
 SANGFOR_USER="${SANGFOR_USER:-sangfor}"
 GRACE_DESKTOP_SECONDS="${GRACE_DESKTOP_SECONDS:-180}"   # 3分钟后关闭 xrdp
 WATCHDOG_INTERVAL="${WATCHDOG_INTERVAL:-5}"
-VPN_TEST_URL="${VPN_TEST_URL:-xxx}"
+VPN_TEST_URL="${VPN_TEST_URL:-}"
 VPN_TEST_TIMEOUT="${VPN_TEST_TIMEOUT:-8}"
 PLUGIN_STRICT_BOOT_SECONDS="${PLUGIN_STRICT_BOOT_SECONDS:-180}"  # 启动前3分钟严格保证 daemon 存在，便于登录
+CORE_RESTART_INTERVAL="${CORE_RESTART_INTERVAL:-90}"
+ATRUST_EINTR_PRELOAD="${ATRUST_EINTR_PRELOAD:-1}"
+EINTR_PRELOAD_LIB="${EINTR_PRELOAD_LIB:-/usr/local/lib/eintr-retry.so}"
 
 LOG_DIR="${LOG_DIR:-/tmp}"
 PLUGIN_LOG="${LOG_DIR}/atrust-plugin-daemon.log"
@@ -28,7 +31,9 @@ DANTED_PID=""
 TINYPROXY_PID=""
 WATCHDOG_PID=""
 DESKTOP_TIMER_PID=""
+KEEPALIVE_PID=""
 DANTED_IF=""
+LAST_CORE_RESTART_TS=0
 
 # =========================
 # Common utils
@@ -64,6 +69,7 @@ cleanup_pid() {
 cleanup() {
   cleanup_pid "${DESKTOP_TIMER_PID:-}"
   cleanup_pid "${WATCHDOG_PID:-}"
+  cleanup_pid "${KEEPALIVE_PID:-}"
   cleanup_pid "${DANTED_PID:-}"
   cleanup_pid "${TINYPROXY_PID:-}"
   cleanup_pid "${PLUGIN_PID:-}"
@@ -95,6 +101,66 @@ ensure_dirs() {
   rm -f /var/run/dbus/pid /run/dbus/pid || true
   rm -f /var/run/xrdp/xrdp.pid /var/run/xrdp/xrdp-sesman.pid /run/xrdp/xrdp.pid /run/xrdp/xrdp-sesman.pid || true
   rm -f /run/tinyproxy/tinyproxy.pid /var/run/tinyproxy/tinyproxy.pid || true
+}
+
+ensure_localhost_sangfor_host() {
+  local host_name hosts_file tmp_file
+  host_name="localhost.sangfor.com.cn"
+  hosts_file="/etc/hosts"
+
+  # aTrust 的本地管理接口依赖该域名命中容器内回环地址，避免被 DNS/TUN 解析成 fake-ip。
+  if getent hosts "$host_name" 2>/dev/null | awk '{print $1}' | grep -qx '127.0.0.1'; then
+    return 0
+  fi
+
+  tmp_file="$(mktemp)"
+  awk -v host_name="$host_name" '
+    $0 !~ ("(^|[[:space:]])" host_name "([[:space:]]|$)") { print }
+    END { print "127.0.0.1 " host_name }
+  ' "$hosts_file" > "$tmp_file"
+  cat "$tmp_file" > "$hosts_file"
+  rm -f "$tmp_file"
+}
+
+configure_eintr_preload() {
+  local preload_file tmp_file
+  preload_file="/etc/ld.so.preload"
+
+  case "$ATRUST_EINTR_PRELOAD" in
+    1|true|TRUE|yes|YES|on|ON)
+      if [ ! -r "$EINTR_PRELOAD_LIB" ]; then
+        log "EINTR preload requested but library is missing: $EINTR_PRELOAD_LIB"
+        return 0
+      fi
+
+      if ! LD_PRELOAD="$EINTR_PRELOAD_LIB" /bin/true >/dev/null 2>&1; then
+        log "EINTR preload library failed validation: $EINTR_PRELOAD_LIB"
+        return 0
+      fi
+
+      # aTrust 的 RPC 线程会被 SIGCHLD 打断；预加载 shim 负责重试 EINTR 并阻断监听 fd 继承。
+      touch "$preload_file"
+      if ! grep -Fxq "$EINTR_PRELOAD_LIB" "$preload_file" 2>/dev/null; then
+        tmp_file="$(mktemp)"
+        awk -v lib="$EINTR_PRELOAD_LIB" '$0 != lib { print }' "$preload_file" > "$tmp_file"
+        printf '%s\n' "$EINTR_PRELOAD_LIB" >> "$tmp_file"
+        cp "$tmp_file" "$preload_file"
+        rm -f "$tmp_file"
+      fi
+
+      log "EINTR preload enabled: $EINTR_PRELOAD_LIB"
+      ;;
+    *)
+      if [ -f "$preload_file" ]; then
+        tmp_file="$(mktemp)"
+        awk -v lib="$EINTR_PRELOAD_LIB" '$0 != lib { print }' "$preload_file" > "$tmp_file"
+        cp "$tmp_file" "$preload_file"
+        rm -f "$tmp_file"
+      fi
+
+      log "EINTR preload disabled"
+      ;;
+  esac
 }
 
 ensure_dbus() {
@@ -191,6 +257,53 @@ plugin_ready() {
   return 1
 }
 
+core_port_file() {
+  echo "/usr/share/sangfor/.aTrust/var/run/httpserver"
+}
+
+core_port() {
+  local f file_port
+  f="$(core_port_file)"
+  file_port="$([ -f "$f" ] && cat "$f" 2>/dev/null || true)"
+  printf '%s\n' "$file_port" 54630 54631 | awk 'NF && !seen[$0]++'
+}
+
+core_alive() {
+  pgrep -f '/usr/share/sangfor/aTrust/resources/bin/aTrustAgent --plugin plugins/aTrustCore --enable-http --enable-event-center' >/dev/null 2>&1
+}
+
+core_ready() {
+  local port
+  core_alive || return 1
+
+  while IFS= read -r port; do
+    [ -n "$port" ] || continue
+    if is_port_listening "$port"; then
+      return 0
+    fi
+  done < <(core_port)
+
+  return 1
+}
+
+restart_core_if_stuck() {
+  local now pid port
+  core_ready && return 0
+
+  now="$(date +%s)"
+  if [ $((now - LAST_CORE_RESTART_TS)) -lt "$CORE_RESTART_INTERVAL" ]; then
+    return 1
+  fi
+
+  port="$(core_port | paste -sd, -)"
+  log "aTrustCore not ready (port=${port:-none}), restarting core process"
+  LAST_CORE_RESTART_TS="$now"
+
+  pid="$(pgrep -f '/usr/share/sangfor/aTrust/resources/bin/aTrustAgent --plugin plugins/aTrustCore --enable-http --enable-event-center' | head -n1 || true)"
+  cleanup_pid "$pid"
+  return 1
+}
+
 start_plugin_daemon() {
   log "starting plugin-daemon"
   rm -f \
@@ -282,7 +395,13 @@ danted_ready() {
   danted_alive && is_port_listening 1080
 }
 
+vpn_http_check_enabled() {
+  [ -n "$VPN_TEST_URL" ]
+}
+
 vpn_http_ok() {
+  vpn_http_check_enabled || return 0
+
   curl -fsS \
     --max-time "$VPN_TEST_TIMEOUT" \
     "$VPN_TEST_URL" >/dev/null 2>&1
@@ -417,6 +536,13 @@ stop_graphical_stack() {
 }
 
 schedule_desktop_shutdown() {
+  case "$GRACE_DESKTOP_SECONDS" in
+    0|never|off|disabled)
+      log "desktop auto-shutdown disabled"
+      return 0
+      ;;
+  esac
+
   (
     sleep "$GRACE_DESKTOP_SECONDS"
     if desktop_running; then
@@ -432,6 +558,16 @@ boot_phase_requires_plugin() {
   now="$(date +%s)"
   elapsed="$((now - START_TS))"
   [ "$elapsed" -lt "$PLUGIN_STRICT_BOOT_SECONDS" ]
+}
+
+watchdog_interval_enabled() {
+  case "$WATCHDOG_INTERVAL" in
+    0|false|FALSE|False|no|NO|No|off|OFF|Off|disabled|DISABLED|Disabled)
+      return 1
+      ;;
+  esac
+
+  return 0
 }
 
 watchdog_loop() {
@@ -495,6 +631,8 @@ watchdog_loop() {
       fi
     fi
 
+    restart_core_if_stuck || true
+
     # 当前本地状态快照
     danted_ok=0
     danted_port_ok=0
@@ -503,8 +641,19 @@ watchdog_loop() {
     is_port_listening 1080 && danted_port_ok=1
     plugin_ready && plugin_ok=1
 
+    # 未配置业务 URL 时只维护本地入口，避免开源默认值绑定私有内网地址
+    if ! vpn_http_check_enabled; then
+      if [ -n "$vpn_if" ] && { [ "$danted_ok" -ne 1 ] || [ "$danted_port_ok" -ne 1 ]; }; then
+        log "vpn http health check disabled + local socks unhealthy -> restarting danted on $vpn_if"
+        start_danted "$vpn_if" || true
+      else
+        log "vpn http health check disabled; local components ok"
+      fi
+      continue
+    fi
+
     # VPN 实际健康检查
-    # 只要内网地址能通，就认为链路正常，不因为 daemon thrift 端口偶发丢失而折腾
+    # 只要配置的探测地址能通，就认为链路正常，不因为 daemon thrift 端口偶发丢失而折腾
     if vpn_http_ok; then
       log "vpn health check ok"
       continue
@@ -524,24 +673,14 @@ watchdog_loop() {
       fi
     fi
 
-    # danted 真挂了，或 1080 真没监听，再动本地 socks 层
+    # danted 真挂了，或 1080 真没监听，再动本地 socks 层。
+    # 业务 URL 失败通常是 aTrust 上游隧道/登录态问题，不能反复重启本地 SOCKS。
     if [ -n "$vpn_if" ] && { [ "$danted_ok" -ne 1 ] || [ "$danted_port_ok" -ne 1 ]; }; then
       log "vpn failed + local socks unhealthy -> restarting danted on $vpn_if"
       start_danted "$vpn_if" || true
       sleep 2
       if vpn_http_ok; then
         log "vpn recovered after danted restart"
-        continue
-      fi
-    fi
-
-    # 非启动期如果 plugin 进程已经没了，再补拉一次
-    if ! plugin_alive; then
-      log "vpn failed and plugin process missing -> restarting plugin-daemon"
-      restart_plugin_daemon
-      sleep 2
-      if vpn_http_ok; then
-        log "vpn recovered after plugin-daemon restart"
         continue
       fi
     fi
@@ -554,23 +693,35 @@ watchdog_loop() {
   done
 }
 
+wait_without_watchdog() {
+  log "watchdog disabled by WATCHDOG_INTERVAL=${WATCHDOG_INTERVAL}; skipping health checks and automatic restarts"
+  tail -f /dev/null &
+  KEEPALIVE_PID=$!
+  wait "$KEEPALIVE_PID"
+}
+
 main() {
   ensure_dirs
+  ensure_localhost_sangfor_host
   ensure_dbus
   write_tinyproxy_conf
+  configure_eintr_preload
 
   start_plugin_daemon
   start_tinyproxy
   start_xrdp
   schedule_desktop_shutdown
 
-  watchdog_loop &
-  WATCHDOG_PID=$!
-
   # 核心设计：
   # 1. 不再把 xrdp / sesman 当成容器必须常驻的关键进程
-  # 2. 容器以 watchdog 为主存活条件
-  wait "$WATCHDOG_PID"
+  # 2. WATCHDOG_INTERVAL=0 时只维持容器存活，不做健康检查和自动重启
+  if watchdog_interval_enabled; then
+    watchdog_loop &
+    WATCHDOG_PID=$!
+    wait "$WATCHDOG_PID"
+  else
+    wait_without_watchdog
+  fi
 }
 
 main "$@"
